@@ -1,0 +1,106 @@
+package com.yonyoucloud.ec.sns.todo.server.services.impl;
+
+import com.yonyoucloud.ec.sns.todo.server.services.CacheService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.DefaultTypedTuple;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.stereotype.Service;
+
+import java.util.*;
+
+/**
+ * simple cache implement
+ *
+ * @author zhuqhc
+ */
+@Service
+@Slf4j
+@RequiredArgsConstructor
+public class CacheServiceImpl implements CacheService {
+
+    private static final String CACHE_PREFIX = "ec::upesn::todo-center::";
+
+    private final StringRedisTemplate redisTemplate;
+
+    @Override
+    public boolean putMap(String key, Map<String, String> hashMapValue) {
+        redisTemplate.opsForHash().putAll(getFullKey(key), hashMapValue);
+        return true;
+    }
+
+    @Override
+    public Map<String, String> getMap(String key) {
+
+        Map<Object, Object> values = redisTemplate.opsForHash().entries(getFullKey(key));
+
+        Map<String, String> result = new HashMap<>(values.size());
+
+        values.forEach((k, v) -> result.put((String) k, (String) v));
+
+        return result;
+    }
+
+    private String getFullKey(String key) {
+        return CACHE_PREFIX + key;
+    }
+
+    @Override
+    public boolean exists(String key) {
+        return redisTemplate.hasKey(getFullKey(key));
+    }
+
+    @Override
+    public boolean delete(String key) {
+        redisTemplate.delete(getFullKey(key));
+        return true;
+    }
+
+    @Override
+    public boolean initSortedSetIndexAsScore(String key, List<String> values) {
+
+        delete(key);
+
+        Set<ZSetOperations.TypedTuple<String>> scoreMembers = new HashSet<>();
+        for (int i = 0; i < values.size(); i++) {
+            ZSetOperations.TypedTuple<String> tuple = new DefaultTypedTuple<>(values.get(i), (double) i);
+            scoreMembers.add(tuple);
+        }
+
+        Long added = redisTemplate.opsForZSet().add(getFullKey(key), scoreMembers);
+
+        return added != null && added > 0;
+    }
+
+    @Override
+    public boolean appendToInitedSortedSet(String key, String value) {
+        String fullKey = getFullKey(key);
+        ZSetOperations<String, String> opsForZSet = redisTemplate.opsForZSet();
+
+        Long count = opsForZSet.zCard(fullKey);
+
+        if (count == null || count == 0) {
+            return false;
+        }
+
+        Boolean add = opsForZSet.add(fullKey, value, count);
+
+        return add != null && add;
+    }
+
+    @Override
+    public List<String> getSortedSetValuesAsc(String key, int size) {
+        String fullKey = getFullKey(key);
+        ZSetOperations<String, String> opsForZSet = redisTemplate.opsForZSet();
+        Set<String> range = opsForZSet.range(fullKey, 0, size);
+
+        if (range == null || range.size() == 0) {
+            return null;
+        }
+
+        return new ArrayList<>(range);
+    }
+
+
+}
