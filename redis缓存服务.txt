@@ -104,3 +104,30 @@ public class CacheServiceImpl implements CacheService {
 
 
 }
+
+
+CacheService:
+
+package com.yonyoucloud.ec.sns.confidential.meeting.service;
+
+
+import com.yonyoucloud.ec.sns.confidential.meeting.error.CacheOpException;
+
+import java.util.Map;
+
+/**
+ * 缓存服务
+ *
+ * @author yaoshw
+ */
+public interface CacheService {
+
+    boolean putMap(String key, Map<String, String> hashMapValue) throws CacheOpException;
+
+    Map<String, String> getMap(String key) throws CacheOpException;
+
+    boolean exists(String key) throws CacheOpException;
+
+    boolean delete(String key) throws CacheOpException;
+}
+
