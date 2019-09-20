@@ -1,0 +1,326 @@
+1.项目中的应用
+
+ DistributedLock lock = meetingService.buildLock(System.currentTimeMillis(), meetingDeclarationVO.getMeetingRoomId());
+
+	//尝试加锁
+	boolean locked = lock.tryLockOnce();
+	if (!locked) {
+		throw new ECInterruptException("加锁失败");
+	}
+	
+2.buildLock如何设计锁
+
+    @Override
+    public DistributedLock buildLock(Long currentTimeMillis, String meetingRoomId) {
+
+
+        DateTime meetingDateTime = new DateTime(currentTimeMillis);
+        DateTimeFormatter fmt = DateTimeFormat.forPattern("yyyyMMdd");
+        String lockStr = fmt.print(meetingDateTime);
+        String lockName = "confidentialMeeting_" + meetingRoomId + lockStr;
+        //锁过期时间10s
+        Duration expire = Duration.ofSeconds(10);
+        //锁延迟释放时间50s
+        Duration releaseDelay = Duration.ofMillis(50);
+
+        return lockFactory.buildLock(lockName, expire, releaseDelay);
+    }
+	
+3.LockFactory:锁的对象工厂
+
+
+import com.yonyoucloud.ec.sns.starter.lock.domain.content.LockContentBuilder;
+
+import java.time.Duration;
+
+/**
+ * 锁的对象工厂
+ *
+ * @author liuhaoi
+ */
+public interface LockFactory {
+
+    /**
+     * 构建锁
+     *
+     * @param lockName     锁的名称
+     * @param expire       锁的过期时间
+     * @param releaseDelay 延迟释放时间
+     * @return 锁
+     */
+    DistributedLock buildLock(final String lockName, Duration expire, Duration releaseDelay);
+
+    /**
+     * 获得锁的内容构造器
+     *
+     * @return 内容构造器
+     */
+    LockContentBuilder getLockContentBuilder();
+
+}
+
+
+
+4.由此牵扯出DistributedLock接口:
+
+package com.yonyoucloud.ec.sns.starter.lock.domain;
+
+import java.time.Duration;
+
+public interface DistributedLock {
+
+    /**
+     * 获取锁的过期时间
+     *
+     * @return 锁的过期时间
+     */
+    Duration getLockExpire();
+
+    /**
+     * 获取锁的名称, 唯一标示
+     *
+     * @return 锁的名称
+     */
+    String getLockUniqueName();
+
+    /**
+     * 尝试获取一次锁
+     *
+     * @return 是否获取到锁
+     */
+    boolean tryLockOnce();
+
+    /**
+     * 尝试获取锁, 有超时时间, 超时未获取到则返回
+     *
+     * @param timeout  最大的尝试时间, 必须大于10毫秒
+     * @param interval 两次尝试之间的间隔, 必须大于10毫秒
+     * @return 是否获取到锁
+     */
+    boolean tryLock(Duration timeout, Duration interval);
+
+    /**
+     * 尝试获取锁, 有最大尝试次数, 尝试多次未获取到则返回
+     *
+     * @param maxRetry 最大尝试次数
+     * @param interval 两次尝试之间的间隔, 必须大于10毫秒
+     * @return 是否获取到锁
+     */
+    boolean tryLockWithMaxRetry(int maxRetry, Duration interval);
+
+    /**
+     * 释放锁
+     */
+    void unlock();
+
+    /**
+     * 延迟进行锁的释放
+     *
+     * @return 延迟锁释放的时间
+     */
+    Duration releaseDelay();
+
+}
+
+5.DistributedLock的实现类
+
+package com.yonyoucloud.ec.sns.starter.lock.domain.redis;
+
+import com.yonyoucloud.ec.sns.starter.lock.domain.DistributedLock;
+import com.yonyoucloud.ec.sns.starter.lock.domain.LockFactory;
+import com.yonyoucloud.ec.sns.starter.lock.domain.content.LockContentBuilder;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.data.redis.core.StringRedisTemplate;
+
+import java.time.Duration;
+
+/**
+ * @author liuhaoi
+ */
+@Slf4j
+@Qualifier("redis")
+public class RedisLockFactoryImpl implements LockFactory {
+
+    private final StringRedisTemplate redisTemplate;
+
+    private final LockContentBuilder lockContentBuilder;
+
+    public RedisLockFactoryImpl(StringRedisTemplate redisTemplate,
+                                LockContentBuilder lockContentBuilder) {
+        this.redisTemplate = redisTemplate;
+        this.lockContentBuilder = lockContentBuilder;
+    }
+
+    @Override
+    public DistributedLock buildLock(String lockName, Duration expire, Duration releaseDelay) {
+        return new RedisDistributedLock(lockName, expire, getLockContentBuilder(), redisTemplate,releaseDelay);
+    }
+
+    @Override
+    public LockContentBuilder getLockContentBuilder() {
+        return lockContentBuilder;
+    }
+}
+
+其中的RedisDistributedLock是这样实现的(重点)
+
+package com.yonyoucloud.ec.sns.starter.lock.domain.redis;
+
+import com.yonyoucloud.ec.sns.error.ECIllegalStateException;
+import com.yonyoucloud.ec.sns.starter.lock.domain.AbstractDistributedLock;
+import com.yonyoucloud.ec.sns.starter.lock.domain.content.LockContentBuilder;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.util.Assert;
+
+import java.time.Duration;
+import java.util.Random;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * @author liuhaoi
+ */
+@Slf4j
+public class RedisDistributedLock extends AbstractDistributedLock {
+
+    private static final Random RANDOM = new Random();
+
+    private long lockTimestamp = -1L;
+
+    private final StringRedisTemplate redisTemplate;
+
+    public RedisDistributedLock(String lockName, Duration expire, LockContentBuilder lockContentBuilder,
+                                StringRedisTemplate redisTemplate, Duration releaseDelay) {
+
+        super(lockName, expire, lockContentBuilder, releaseDelay);
+        this.redisTemplate = redisTemplate;
+    }
+
+
+    @Override
+    public boolean tryLockOnce() {
+        try {
+            if (setNxAndEx(lockName, getLockExpire())) {
+                this.locked = true;
+                lockTimestamp = System.currentTimeMillis();
+                return true;
+            }
+            return false;
+        } catch (Exception e) {
+            log.warn("lock failed", e);
+            return false;
+        }
+    }
+
+    @Override
+    public boolean tryLock(Duration timeout, Duration interval) {
+
+        long currentNanosecond = System.nanoTime();
+        long timeoutNanosecond = timeout.toNanos();
+        long intervalNanosecond = interval.toNanos();
+
+        do {
+            if (tryLockOnce()) {
+                return true;
+            }
+
+            // 剩余时间不足够一次等待间隔
+            long remainedNanosecond = timeoutNanosecond + currentNanosecond - System.nanoTime();
+            if (intervalNanosecond < remainedNanosecond) {
+                sleep(remainedNanosecond);
+                continue;
+            }
+
+            // 短暂休眠，避免出现活锁
+            sleep(timeoutNanosecond);
+        } while ((System.nanoTime() - currentNanosecond) < timeoutNanosecond);
+
+        log.warn("try lock interval failed with timeout {} {}", timeout);
+
+        return false;
+    }
+
+    private void sleep(long nanosecond) {
+        try {
+            Thread.sleep(TimeUnit.NANOSECONDS.toMillis(nanosecond), RANDOM.nextInt(1000000));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("InterruptedException when wait for lock", e);
+        }
+    }
+
+    @Override
+    public boolean tryLockWithMaxRetry(int maxRetry, Duration interval) {
+
+        if (maxRetry < 1) {
+            maxRetry = 1;
+        }
+
+        for (int i = 0; i < maxRetry; i++) {
+            if (tryLockOnce()) {
+                return true;
+            }
+            sleep(interval.toNanos());
+        }
+
+        log.warn("try lock interval failed with max retry {} and interval {}", maxRetry, interval);
+
+        return false;
+    }
+
+    @Override
+    public void unlock() {
+        if (!this.locked) {
+            throw new ECIllegalStateException("Can not do unlock before locked");
+        }
+
+        Duration timeout = releaseDelay();
+        if (timeout == null) {
+            timeout = Duration.ZERO;
+        }
+
+        //减去已经执行时间
+        if ((timeout.toMillis() - (System.currentTimeMillis() - lockTimestamp)) <= 0) {
+            redisTemplate.delete(lockName);
+        } else {
+            redisTemplate.opsForValue().set(lockName, lockContentBuilder.build().toJson(), timeout);
+        }
+        this.locked = false;
+    }
+
+    /**
+     * 重写redisTemplate的set方法
+     * <p>
+     * 命令 SET resource-name anyString NX EX max-lock-time 是一种在 Redis 中实现锁的简单方法。
+     * <p>
+     * 客户端执行以上的命令：
+     * <p>
+     * 如果服务器返回 OK ，那么这个客户端获得锁。
+     * 如果服务器返回 NIL ，那么客户端获取锁失败，可以在稍后再重试。
+     *
+     * @param key    锁的Key
+     * @param expire 过去时间（秒）
+     * @return 成功为"OK"
+     */
+    private Boolean setNxAndEx(final String key, final Duration expire) {
+
+        Assert.isTrue(!StringUtils.isEmpty(key), "lock key can not be empty");
+
+        String lockContent = lockContentBuilder.build().toJson();
+
+        try {
+            return redisTemplate.opsForValue().setIfAbsent(key, lockContent, expire);
+        } catch (Exception e) {
+            log.warn("Exception when lock by redis", e);
+            String s = redisTemplate.opsForValue().get(key);
+            return StringUtils.equals(lockContent, s);
+        }
+
+    }
+
+}
+
+
+
