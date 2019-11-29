@@ -1,0 +1,11 @@
+ @Override
+    public boolean appendToInitedSortedSet(String key, String value) {
+        //zset集合：key、value、score
+        String fullKey = getFullKey(key);
+        ZSetOperations<String, String> opsForZSet = redisTemplate.opsForZSet();
+
+        //每个member的score由count值转换为当前时间戳
+        Boolean add = opsForZSet.add(fullKey, value, (double) System.currentTimeMillis());
+
+        return add != null && add;
+    }
