@@ -1,0 +1,24 @@
+  
+	使用sortedset，拿时间戳作为score，消息内容作为key调用zadd来生产消息，消费者用zrangebyscore指令获取N秒之前的数据轮询进行处理
+	
+	
+	@Override
+    public boolean appendToInitedSortedSet(String key, String value) {
+        //zset集合：key、value、score
+        String fullKey = getFullKey(key);
+        ZSetOperations<String, String> opsForZSet = redisTemplate.opsForZSet();
+
+        //每个member的score由count值转换为当前时间戳
+        Boolean add = opsForZSet.add(fullKey, value, (double) System.currentTimeMillis());
+
+        return add != null && add;
+    }
+	
+	
+	
+	  @Override
+    public Set<ZSetOperations.TypedTuple<String>> getUserTypeNameSet(String key, long start, long end) {
+
+        return redisTemplate.opsForZSet().rangeWithScores(getFullTypeNameKey(String.format(TYPE_CACHE_PREFIX, key)), start, end);
+
+    }
